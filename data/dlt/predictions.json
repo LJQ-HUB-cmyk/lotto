@@ -1,0 +1,20 @@
+[
+  {
+    "id": "pred_26060_20260601_101126",
+    "period": "26060",
+    "draw_date": "待定",
+    "created_at": "2026-06-01 10:11:26",
+    "status": "active",
+    "models_used": ["frequency", "poisson", "exponential_smoothing", "monte_carlo"],
+    "recommendations": [
+      {"group": 1, "main": [7, 14, 16, 22, 31], "sub": [5, 8], "score": 51.18, "reason": "综合评分 51.2"},
+      {"group": 2, "main": [7, 11, 18, 24, 31], "sub": [5, 8], "score": 51.26, "reason": "综合评分 51.3"},
+      {"group": 3, "main": [9, 12, 13, 18, 22], "sub": [1, 8], "score": 61.84, "reason": "综合评分 61.8"},
+      {"group": 4, "main": [9, 10, 13, 19, 26], "sub": [5, 8], "score": 61.69, "reason": "综合评分 61.7"},
+      {"group": 5, "main": [9, 12, 13, 18, 28], "sub": [5, 8], "score": 61.03, "reason": "综合评分 61.0"}
+    ],
+    "actual_draw": null,
+    "matches": null,
+    "summary": null
+  }
+]
