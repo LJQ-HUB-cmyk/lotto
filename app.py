@@ -84,19 +84,36 @@ def pred_card(rec, matches=None, active=True, cfg=None):
     mb = "".join(ball(n, "main", n in mh) for n in rec["main"])
     sb = "".join(ball(n, "sub", n in sh) for n in rec["sub"])
     ht = ""
+    
+    # Strategy badge
+    reason = rec.get("reason", "")
+    strategy_name = reason.split(":")[0] if ":" in reason else "综合推荐"
+    strategy_icons = {
+        "高频热号": "🔥", "近期趋势": "📈", "追冷": "❄️",
+        "马尔可夫": "🔗", "平衡策略": "⚖️",
+    }
+    strategy_colors = {
+        "高频热号": "#dc2626", "近期趋势": "#059669", "追冷": "#2563eb",
+        "马尔可夫": "#7c3aed", "平衡策略": "#d97706",
+    }
+    icon = strategy_icons.get(strategy_name, "🎯")
+    color = strategy_colors.get(strategy_name, "#64748b")
 
     if gm and gm.get("total_hits", 0) > 0:
         m = gm
         ht = (f"<div style='margin-top:0.5rem;font-size:0.85rem;color:#eab308;font-weight:600;'>🎯 命中 {m['main_hits']}{cfg.main_label} + {m['sub_hits']}{cfg.sub_label} = {m['total_hits']}个</div>")
     elif active:
         ht = "<div style='margin-top:0.5rem;font-size:0.85rem;color:#64748b;'>⏳ 待开奖</div>"
-    return (f"<div class='glass-card glow' style='padding:1rem;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;'>"
-            f"<span style='font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#94a3b8;'>第{g}组</span>"
-            f"<span style='font-size:0.75rem;color:#2563eb;font-weight:600;font-family:JetBrains Mono,monospace;'>综合得分 {sc:.1f}</span></div>"
+    return (f"<div class='glass-card glow' style='padding:1rem;border-top:3px solid {color};'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>"
+            f"<div style='display:flex;align-items:center;gap:0.5rem;'>"
+            f"<span style='background:{color};color:#fff;border-radius:6px;padding:0.15rem 0.5rem;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;'>{icon} {strategy_name}</span>"
+            f"<span style='font-size:0.7rem;font-weight:600;color:#94a3b8;'>#{g}</span>"
+            f"</div>"
+            f"<span style='font-size:0.75rem;color:{color};font-weight:600;font-family:JetBrains Mono,monospace;'>{sc:.1f}</span></div>"
             f"<div style='margin-bottom:0.5rem;'><div style='font-size:0.7rem;color:#64748b;margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.05em;'>{cfg.main_label} · {cfg.main_count}码</div><div>{mb}</div></div>"
             f"<div style='margin-bottom:0.5rem;'><div style='font-size:0.7rem;color:#64748b;margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.05em;'>{cfg.sub_label} · {cfg.sub_count}码</div><div>{sb}</div></div>"
-            f"<div style='font-size:0.7rem;color:#64748b;margin-top:0.35rem;'>📊 {rec.get('reason','综合评分 '+str(round(rec['score'],1)))}</div>{ht}</div>")
+            f"<div style='font-size:0.7rem;color:#94a3b8;margin-top:0.35rem;'>{reason}</div>{ht}</div>")
 
 def hist_row(rec, mm=None, cfg=None):
     g = rec.get("index", rec.get("group", 1))
@@ -107,8 +124,17 @@ def hist_row(rec, mm=None, cfg=None):
     sb = "".join(ball(n, "sub", n in sh) for n in rec["sub"])
     t = m.get("total_hits", 0) if m else 0
     bdg = f"<span style='color:#eab308;font-weight:700;font-size:0.85rem;'>🎯 命中 {t}个</span>" if t > 0 else ""
+    # Strategy badge for history
+    reason = rec.get("reason", "")
+    strategy_name = reason.split(":")[0] if ":" in reason else ""
+    strategy_colors = {"高频热号":"#dc2626","近期趋势":"#059669","追冷":"#2563eb","马尔可夫":"#7c3aed","平衡策略":"#d97706"}
+    strategy_icons = {"高频热号":"🔥","近期趋势":"📈","追冷":"❄️","马尔可夫":"🔗","平衡策略":"⚖️"}
+    scolor = strategy_colors.get(strategy_name, "#94a3b8")
+    sicon = strategy_icons.get(strategy_name, "")
+    strat_tag = f"<span style='background:{scolor};color:#fff;border-radius:4px;padding:0.1rem 0.4rem;font-size:0.6rem;font-weight:700;'>{sicon} {strategy_name}</span>" if strategy_name else ""
     return (f"<div style='background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px;padding:0.6rem 0.8rem;margin-bottom:0.4rem;display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;'>"
             f"<span style='font-weight:700;color:#94a3b8;font-size:0.75rem;min-width:2.5rem;'>第{g}组</span>"
+            f"{strat_tag}"
             f"<span style='font-size:0.7rem;color:#94a3b8;'>{cfg.main_label}</span>{mb}"
             f"<span style='font-size:0.7rem;color:#94a3b8;margin-left:0.3rem;'>{cfg.sub_label}</span>{sb}"
             f"{'&nbsp;'+bdg if bdg else ''}</div>")
