@@ -484,8 +484,7 @@ def render_page(cfg):
                 st.markdown("<hr>", unsafe_allow_html=True)
                 st.markdown("<h3 style='font-size:1.1rem;color:#1e293b;'>🎯 ML组合推荐</h3>", unsafe_allow_html=True)
                 recs = engine.generate_recommendations(
-                    num_groups=num_groups, use_ga=True,
-                    ga_generations=30, ga_population=100,
+                    num_groups=num_groups,
                 )
                 cols = st.columns(min(5, len(recs["groups"])))
                 for i, grp in enumerate(recs["groups"]):

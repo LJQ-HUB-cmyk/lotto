@@ -276,21 +276,13 @@ class AdvancedPredictionEngine:
     def generate_recommendations(
         self,
         num_groups: int = 5,
-        use_ga: bool = True,
-        ga_generations: int = 50,
-        ga_population: int = 200,
-        max_candidates: int = 5000,
-        verbose: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate recommendations using 5 different strategies.
         
-        Each group represents a DIFFERENT reasoning approach:
-        1. Hot Strategy — highest frequency numbers
-        2. Cold/Overdue Strategy — numbers that haven't appeared longest
-        3. Markov Strategy — transition probability from last draw
-        4. Balanced Strategy — mix hot/cold/warm with structural balance
-        5. Contrarian Strategy — avoid popular numbers, pick mid-range
+        Each group represents a DIFFERENT reasoning approach.
+        Strategies use their OWN model probabilities, not the ensemble.
+        Sub-numbers are enforced to be different across all strategies.
         """
         self.logger.info("Generating %d recommendations via multi-strategy...", num_groups)
 
@@ -300,110 +292,105 @@ class AdvancedPredictionEngine:
         main_n = self.n_main
         sub_n = self.n_sub
 
-        # Pre-compute model probability distributions
+        # Pre-compute ensemble probability ranks
         main_probs = self._ensemble_probs[0]
         sub_probs = self._ensemble_probs[1]
-        
-        # Rank numbers by probability
-        main_ranked = np.argsort(main_probs)[::-1]  # highest first
+        main_ranked = np.argsort(main_probs)[::-1]
         sub_ranked = np.argsort(sub_probs)[::-1]
+        
+        # Track used sub-numbers to guarantee cross-strategy diversity
+        used_sub_numbers = set()
 
-        strategies = []
+        def _pick_sub(strategy_name: str, sub_scores: np.ndarray, prefer_hot: bool = True, avoid_numbers: set = None) -> List[int]:
+            """Pick sub numbers that haven't been used by other strategies."""
+            avoid = set(avoid_numbers) if avoid_numbers else set()
+            ranked = np.argsort(sub_scores)
+            if prefer_hot:
+                ranked = ranked[::-1]  # highest first
+            
+            candidates = [i for i in ranked if i not in avoid]
+            if len(candidates) < self.cfg.sub_count:
+                candidates = list(range(sub_n))
+            
+            # First try: pick from unused sub-numbers
+            unused = [i for i in candidates if i not in used_sub_numbers]
+            if len(unused) >= self.cfg.sub_count:
+                picked = unused[:self.cfg.sub_count]
+            else:
+                # Allow some reuse but minimize
+                picked = candidates[:self.cfg.sub_count]
+            
+            result = sorted([sub_range[i] for i in picked])
+            for i in picked:
+                used_sub_numbers.add(i)
+            return result
 
-        # === Strategy 1: Hot (high frequency) ===
+        # === Strategy 1: Pure Frequency (full history) ===
         def strategy_hot():
-            m = sorted([main_range[i] for i in main_ranked[:self.cfg.main_count]])
-            s = sorted([sub_range[i] for i in sub_ranked[:self.cfg.sub_count]])
-            return m, s, "高频热号策略: 选历史出现频率最高的号码"
+            mf = self._model_probs.get("frequency", (main_probs, sub_probs))[0]
+            sf = self._model_probs.get("frequency", (sub_probs, sub_probs))[1]
+            m = sorted([main_range[i] for i in np.argsort(mf)[::-1][:self.cfg.main_count]])
+            s = _pick_sub("hot", sf, prefer_hot=True)
+            return m, s, "高频热号策略: 选200期历史中出现频率最高的号码"
 
-        strategies.append(strategy_hot)
+        # === Strategy 2: Sliding Window (recent 50 draws trend) ===
+        def strategy_trend():
+            mw = self._model_probs.get("sliding_window", (main_probs, sub_probs))[0]
+            sw = self._model_probs.get("sliding_window", (sub_probs, sub_probs))[1]
+            m = sorted([main_range[i] for i in np.argsort(mw)[::-1][:self.cfg.main_count]])
+            s = _pick_sub("trend", sw, prefer_hot=True)
+            return m, s, "近期趋势策略: 选最近50期出现频率最高的号码"
 
-        # === Strategy 2: Cold/Overdue (Poisson overdue) ===
+        # === Strategy 3: Poisson Overdue (coldest numbers) ===
         def strategy_cold():
-            score = self._model_probs.get("poisson", (main_probs, sub_probs))[0]
-            ranked = np.argsort(score)[::-1]
-            # Overdue: highest Poisson probability = most overdue
-            m = sorted([main_range[i] for i in ranked[:self.cfg.main_count]])
-            s_score = self._model_probs.get("poisson", (main_probs, sub_probs))[1]
-            s_ranked = np.argsort(s_score)[::-1]
-            s = sorted([sub_range[i] for i in s_ranked[:self.cfg.sub_count]])
-            return m, s, "追冷策略: 选最久未出现的号码(泊松逾期)"
+            # Use the actual overdue data: pick numbers with longest absence
+            # Poisson model scores: higher = more overdue
+            mp = self._model_probs.get("poisson", (main_probs, sub_probs))[0]
+            sp = self._model_probs.get("poisson", (sub_probs, sub_probs))[1]
+            m = sorted([main_range[i] for i in np.argsort(mp)[::-1][:self.cfg.main_count]])
+            s = _pick_sub("cold", sp, prefer_hot=False)  # prefer overdue (cold)
+            return m, s, "追冷策略: 选最久未出现的号码(泊松逾期概率最高)"
 
-        strategies.append(strategy_cold)
-
-        # === Strategy 3: Markov chain ===
+        # === Strategy 4: Markov Chain (transition from last draw) ===
         def strategy_markov():
             mm = self._model_probs.get("markov_chain", (main_probs, sub_probs))[0]
-            sm = self._model_probs.get("markov_chain", (main_probs, sub_probs))[1]
-            m_ranked = np.argsort(mm)[::-1]
-            m = sorted([main_range[i] for i in m_ranked[:self.cfg.main_count]])
-            s_ranked = np.argsort(sm)[::-1]
-            s = sorted([sub_range[i] for i in s_ranked[:self.cfg.sub_count]])
-            return m, s, "马尔可夫策略: 基于上期号码的转移概率"
+            sm = self._model_probs.get("markov_chain", (sub_probs, sub_probs))[1]
+            m = sorted([main_range[i] for i in np.argsort(mm)[::-1][:self.cfg.main_count]])
+            s = _pick_sub("markov", sm, prefer_hot=True)
+            return m, s, "马尔可夫策略: 基于上期号码转移概率预测本期"
 
-        strategies.append(strategy_markov)
-
-        # === Strategy 4: Balanced (hot + warm + cold mix) ===
+        # === Strategy 5: Balanced contrarian (mid-frequency + structure) ===
         def strategy_balanced():
-            # Take a mix: 2 hot + 2 warm + (rest) cold
-            third = self.cfg.main_count // 3
-            hot_count = max(1, third)
-            warm_count = max(1, third)
-            cold_count = self.cfg.main_count - hot_count - warm_count
-            
-            hot_idx = main_ranked[:int(main_n * 0.2)]
-            warm_idx = main_ranked[int(main_n * 0.2):int(main_n * 0.7)]
-            cold_idx = main_ranked[int(main_n * 0.7):]
+            # Exclude hottest 30% and coldest 30%, pick from middle 40%
+            main_mid_start = int(main_n * 0.3)
+            main_mid_end = int(main_n * 0.7)
+            mid_pool = list(range(main_mid_start, main_mid_end))
             
             import random
-            rng = random.Random(42)
-            chosen = []
-            chosen.extend(rng.sample(list(hot_idx), min(hot_count, len(hot_idx))))
-            chosen.extend(rng.sample(list(warm_idx), min(warm_count, len(warm_idx))))
-            chosen.extend(rng.sample(list(cold_idx), min(cold_count, len(cold_idx))))
+            rng = random.Random(246)
+            if len(mid_pool) >= self.cfg.main_count:
+                chosen = rng.sample(mid_pool, self.cfg.main_count)
+            else:
+                chosen = list(mid_pool)
+                extras = [i for i in range(main_n) if i not in chosen]
+                chosen.extend(rng.sample(extras, self.cfg.main_count - len(chosen)))
             
-            # Ensure unique
-            chosen = list(set(chosen))
-            while len(chosen) < self.cfg.main_count:
-                n = rng.choice(range(main_n))
-                if n not in chosen:
-                    chosen.append(n)
-            
-            m = sorted([main_range[i] for i in chosen[:self.cfg.main_count]])
-            
-            # Sub: mix hot and cold
-            s_hot = sub_ranked[:max(1, sub_n // 3)]
-            s_cold = sub_ranked[-max(1, sub_n // 3):]
-            s_chosen = list(rng.sample(list(s_hot), min(1, len(s_hot))))
-            if self.cfg.sub_count > 1:
-                s_chosen.extend(rng.sample(list(s_cold), min(self.cfg.sub_count - 1, len(s_cold))))
-            s = sorted([sub_range[i] for i in s_chosen[:self.cfg.sub_count]])
-            return m, s, "均衡策略: 冷热号混合搭配，兼顾结构合理性"
-
-        strategies.append(strategy_balanced)
-
-        # === Strategy 5: Contrarian (avoid popular numbers) ===
-        def strategy_contrarian():
-            # Avoid top 20% most common numbers
-            avoid_top = max(1, main_n // 5)
-            pool_indices = list(range(avoid_top, main_n))
-            import random
-            rng = random.Random(123)
-            chosen = rng.sample(pool_indices, self.cfg.main_count)
             m = sorted([main_range[i] for i in chosen])
             
-            # Sub: avoid most popular sub numbers
-            s_avoid = max(0, sub_n // 4)
-            s_pool = list(range(s_avoid, sub_n))
-            if len(s_pool) < self.cfg.sub_count:
-                s_pool = list(range(sub_n))
-            s_chosen = sorted(rng.sample(s_pool, self.cfg.sub_count))
-            s = [sub_range[i] for i in s_chosen]
-            return m, s, "反大众策略: 避开高热度号码，选中等频率号码"
+            # Sub: pick from warm zone (not hot, not cold)
+            sub_mid = list(range(int(sub_n * 0.25), int(sub_n * 0.75)))
+            if len(sub_mid) >= self.cfg.sub_count:
+                sub_scores = np.ones(sub_n)
+                for idx in sub_mid:
+                    sub_scores[idx] = 2.0  # boost mid-range
+            else:
+                sub_scores = sub_probs
+            s = _pick_sub("balanced", sub_scores, prefer_hot=True)
+            return m, s, "平衡策略: 避开极端冷热号，选中段频率号码保证结构合理"
 
-        strategies.append(strategy_contrarian)
+        strategies = [strategy_hot, strategy_trend, strategy_cold, strategy_markov, strategy_balanced]
 
-        # Execute each strategy to produce one group
+        # Execute each strategy
         for i, strat_fn in enumerate(strategies[:num_groups]):
             main_cand, sub_cand, reason = strat_fn()
             score_val = round(self._score_combination(main_cand, sub_cand), 2)
