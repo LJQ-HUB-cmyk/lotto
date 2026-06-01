@@ -283,116 +283,143 @@ class AdvancedPredictionEngine:
         verbose: bool = False,
     ) -> Dict[str, Any]:
         """
-        Generate comprehensive recommendations.
-
-        Parameters
-        ----------
-        num_groups : number of recommendation groups
-        use_ga     : use genetic algorithm optimization
-        ga_generations : GA generations
-        ga_population  : GA population size
-        max_candidates : fallback candidate count
-
-        Returns
-        -------
-        dict with:
-            groups: [{index, main, sub, score, fitness, reason}]
-            model_weights: current adaptive weights
-            ml_confidence: ML model confidence
-            ga_stats: GA evolution statistics
-            feature_importance: top features
-            performance_summary: model performance overview
-            ensemble_breakdown: per-model contribution
+        Generate recommendations using 5 different strategies.
+        
+        Each group represents a DIFFERENT reasoning approach:
+        1. Hot Strategy — highest frequency numbers
+        2. Cold/Overdue Strategy — numbers that haven't appeared longest
+        3. Markov Strategy — transition probability from last draw
+        4. Balanced Strategy — mix hot/cold/warm with structural balance
+        5. Contrarian Strategy — avoid popular numbers, pick mid-range
         """
-        self.logger.info("Generating %d recommendations...", num_groups)
+        self.logger.info("Generating %d recommendations via multi-strategy...", num_groups)
 
         groups = []
+        main_range = list(range(self.cfg.main_min, self.cfg.main_max + 1))
+        sub_range = list(range(self.cfg.sub_min, self.cfg.sub_max + 1))
+        main_n = self.n_main
+        sub_n = self.n_sub
 
-        if use_ga:
-            # ---- GENETIC ALGORITHM APPROACH ----
-            ga = GAOptimizer(
-                self.cfg,
-                population_size=ga_population,
-                generations=min(ga_generations, 30),  # cap to maintain diversity
-                elite_ratio=0.08,  # lower elite ratio for more diversity
-                crossover_rate=0.7,
-                mutation_rate=0.2,  # higher mutation for diversity
-            )
-            self.ga_optimizer = ga
+        # Pre-compute model probability distributions
+        main_probs = self._ensemble_probs[0]
+        sub_probs = self._ensemble_probs[1]
+        
+        # Rank numbers by probability
+        main_ranked = np.argsort(main_probs)[::-1]  # highest first
+        sub_ranked = np.argsort(sub_probs)[::-1]
 
-            prob_scores = {
-                "main_probs": self._ensemble_probs[0],
-                "sub_probs": self._ensemble_probs[1],
-            }
+        strategies = []
 
-            ga_result = ga.evolve(
-                prob_scores=prob_scores,
-                verbose=verbose,
-            )
+        # === Strategy 1: Hot (high frequency) ===
+        def strategy_hot():
+            m = sorted([main_range[i] for i in main_ranked[:self.cfg.main_count]])
+            s = sorted([sub_range[i] for i in sub_ranked[:self.cfg.sub_count]])
+            return m, s, "高频热号策略: 选历史出现频率最高的号码"
 
-            # Select diverse groups from GA top candidates
-            ga_candidates = ga_result["top_n"]
+        strategies.append(strategy_hot)
+
+        # === Strategy 2: Cold/Overdue (Poisson overdue) ===
+        def strategy_cold():
+            score = self._model_probs.get("poisson", (main_probs, sub_probs))[0]
+            ranked = np.argsort(score)[::-1]
+            # Overdue: highest Poisson probability = most overdue
+            m = sorted([main_range[i] for i in ranked[:self.cfg.main_count]])
+            s_score = self._model_probs.get("poisson", (main_probs, sub_probs))[1]
+            s_ranked = np.argsort(s_score)[::-1]
+            s = sorted([sub_range[i] for i in s_ranked[:self.cfg.sub_count]])
+            return m, s, "追冷策略: 选最久未出现的号码(泊松逾期)"
+
+        strategies.append(strategy_cold)
+
+        # === Strategy 3: Markov chain ===
+        def strategy_markov():
+            mm = self._model_probs.get("markov_chain", (main_probs, sub_probs))[0]
+            sm = self._model_probs.get("markov_chain", (main_probs, sub_probs))[1]
+            m_ranked = np.argsort(mm)[::-1]
+            m = sorted([main_range[i] for i in m_ranked[:self.cfg.main_count]])
+            s_ranked = np.argsort(sm)[::-1]
+            s = sorted([sub_range[i] for i in s_ranked[:self.cfg.sub_count]])
+            return m, s, "马尔可夫策略: 基于上期号码的转移概率"
+
+        strategies.append(strategy_markov)
+
+        # === Strategy 4: Balanced (hot + warm + cold mix) ===
+        def strategy_balanced():
+            # Take a mix: 2 hot + 2 warm + (rest) cold
+            third = self.cfg.main_count // 3
+            hot_count = max(1, third)
+            warm_count = max(1, third)
+            cold_count = self.cfg.main_count - hot_count - warm_count
             
-            # Use _select_diverse across GA candidates + weighted sampling for real diversity
-            ga_combo_set = set()
-            all_candidates = []
-            for entry in ga_candidates:
-                key = (tuple(entry["main"]), tuple(entry["sub"]))
-                if key not in ga_combo_set:
-                    ga_combo_set.add(key)
-                    all_candidates.append({"main": entry["main"], "sub": entry["sub"]})
+            hot_idx = main_ranked[:int(main_n * 0.2)]
+            warm_idx = main_ranked[int(main_n * 0.2):int(main_n * 0.7)]
+            cold_idx = main_ranked[int(main_n * 0.7):]
             
-            # Supplement with weighted sampling if not enough
-            if len(all_candidates) < num_groups * 3:
-                extra = self._generate_candidates(3000)
-                for c in extra:
-                    key = (tuple(c["main"]), tuple(c["sub"]))
-                    if key not in ga_combo_set:
-                        ga_combo_set.add(key)
-                        all_candidates.append(c)
+            import random
+            rng = random.Random(42)
+            chosen = []
+            chosen.extend(rng.sample(list(hot_idx), min(hot_count, len(hot_idx))))
+            chosen.extend(rng.sample(list(warm_idx), min(warm_count, len(warm_idx))))
+            chosen.extend(rng.sample(list(cold_idx), min(cold_count, len(cold_idx))))
             
-            selected = self._select_diverse(all_candidates, num_groups)
-            for i, cand in enumerate(selected):
-                score_val = self._score_combination(cand["main"], cand["sub"])
-                risk_val = self._compute_risk_score(cand["main"], cand["sub"])
-                struct_val = self._compute_structure_score(cand["main"], cand["sub"])
-                groups.append({
-                    "index": i + 1,
-                    "main": cand["main"],
-                    "sub": cand["sub"],
-                    "score": round(score_val, 2),
-                    "fitness": round(sum(self._ensemble_probs[0][n - self.cfg.main_min] for n in cand["main"]) + sum(self._ensemble_probs[1][n - self.cfg.sub_min] for n in cand["sub"]), 2),
-                    "risk_score": round(risk_val, 2),
-                    "structure_score": round(struct_val, 2),
-                    "source": "ga_diverse",
-                })
+            # Ensure unique
+            chosen = list(set(chosen))
+            while len(chosen) < self.cfg.main_count:
+                n = rng.choice(range(main_n))
+                if n not in chosen:
+                    chosen.append(n)
+            
+            m = sorted([main_range[i] for i in chosen[:self.cfg.main_count]])
+            
+            # Sub: mix hot and cold
+            s_hot = sub_ranked[:max(1, sub_n // 3)]
+            s_cold = sub_ranked[-max(1, sub_n // 3):]
+            s_chosen = list(rng.sample(list(s_hot), min(1, len(s_hot))))
+            if self.cfg.sub_count > 1:
+                s_chosen.extend(rng.sample(list(s_cold), min(self.cfg.sub_count - 1, len(s_cold))))
+            s = sorted([sub_range[i] for i in s_chosen[:self.cfg.sub_count]])
+            return m, s, "均衡策略: 冷热号混合搭配，兼顾结构合理性"
 
-            ga_stats = {
-                "generations_run": ga_result["generations_run"],
-                "final_diversity": ga_result["final_diversity"],
-                "evolution_history": ga_result["evolution_history"][::5],  # sample every 5
-                "best_fitness": ga_result["best_fitness"],
-            }
-        else:
-            # ---- WEIGHTED SAMPLING APPROACH ----
-            ga_stats = None
-            candidates = self._generate_candidates(max_candidates)
-            selected = self._select_diverse(candidates, num_groups)
+        strategies.append(strategy_balanced)
 
-            for i, cand in enumerate(selected):
-                score = self._score_combination(cand["main"], cand["sub"])
-                risk = self._compute_risk_score(cand["main"], cand["sub"])
-                struct = self._compute_structure_score(cand["main"], cand["sub"])
-                groups.append({
-                    "index": i + 1,
-                    "main": cand["main"],
-                    "sub": cand["sub"],
-                    "score": round(score, 2),
-                    "fitness": round(score, 2),
-                    "risk_score": round(risk, 2),
-                    "structure_score": round(struct, 2),
-                    "source": "weighted_sampling",
-                })
+        # === Strategy 5: Contrarian (avoid popular numbers) ===
+        def strategy_contrarian():
+            # Avoid top 20% most common numbers
+            avoid_top = max(1, main_n // 5)
+            pool_indices = list(range(avoid_top, main_n))
+            import random
+            rng = random.Random(123)
+            chosen = rng.sample(pool_indices, self.cfg.main_count)
+            m = sorted([main_range[i] for i in chosen])
+            
+            # Sub: avoid most popular sub numbers
+            s_avoid = max(0, sub_n // 4)
+            s_pool = list(range(s_avoid, sub_n))
+            if len(s_pool) < self.cfg.sub_count:
+                s_pool = list(range(sub_n))
+            s_chosen = sorted(rng.sample(s_pool, self.cfg.sub_count))
+            s = [sub_range[i] for i in s_chosen]
+            return m, s, "反大众策略: 避开高热度号码，选中等频率号码"
+
+        strategies.append(strategy_contrarian)
+
+        # Execute each strategy to produce one group
+        for i, strat_fn in enumerate(strategies[:num_groups]):
+            main_cand, sub_cand, reason = strat_fn()
+            score_val = round(self._score_combination(main_cand, sub_cand), 2)
+            risk_val = round(self._compute_risk_score(main_cand, sub_cand), 2)
+            struct_val = round(self._compute_structure_score(main_cand, sub_cand), 2)
+            groups.append({
+                "index": i + 1,
+                "main": main_cand,
+                "sub": sub_cand,
+                "score": score_val,
+                "fitness": score_val,
+                "risk_score": risk_val,
+                "structure_score": struct_val,
+                "reason": reason,
+                "source": f"strategy_{i+1}",
+            })
 
         # Compute model contributions
         adaptive_w = self.performance_db.compute_adaptive_weights(self.base_weights)
@@ -414,7 +441,6 @@ class AdvancedPredictionEngine:
             "model_weights": {k: round(v * 100, 1) for k, v in sorted(adaptive_w.items(), key=lambda x: -x[1])},
             "ensemble_breakdown": ensemble_breakdown,
             "ml_confidence": round(self._ml_confidence * 100, 1),
-            "ga_stats": ga_stats,
             "feature_importance": self.ml_predictor.get_feature_importance(15),
             "performance_summary": self.performance_db.get_performance_summary(),
             "candidates_evaluated": len(groups),
