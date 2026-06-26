@@ -164,6 +164,12 @@ def save_prediction(period: str, recommendations: list, cfg, models_used: list =
     if existing:
         predictions = [p for p in predictions if p["id"] != existing[0]["id"]]
     predictions.append(entry)
+
+    # 归档同一算法下更早的活跃预测（避免同算法多期待开奖）
+    for p in predictions:
+        if p["id"] != entry["id"] and p.get("status") == "active" and p.get("algorithm") == algorithm:
+            p["status"] = "archived"
+
     _save_all(predictions, cfg)
     return pred_id
 
